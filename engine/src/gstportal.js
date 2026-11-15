@@ -332,7 +332,12 @@ async function settle(page, tag, logStep, waitMs = 8000) {
 async function visit(page, url, linkText, tag, logStep) {
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: STEP_TIMEOUT, referer: "https://www.gst.gov.in/" });
-    if (await settle(page, tag, logStep)) return true;
+    let ok = await settle(page, tag, logStep);
+    if (ok && url !== U.home) {
+      let u = ""; try { u = page.url(); } catch { /* ignore */ }
+      if (u.replace(/\/$/, "") === U.home.replace(/\/$/, "")) { ok = false; logStep(tag + "-redirected-home", "subdomain bounced to home — trying menu click"); }
+    }
+    if (ok) return true;
     logStep(tag + "-rejected", "direct goto rejected — trying menu click");
   } catch (e) { logStep(tag + "-goto-err", e.message); }
   // fallback: go home, then click the nav link with matching text
@@ -495,43 +500,19 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
           base.returnStatuses.push({ type: (joined.match(/GSTR-?\d+[A-Z]?/i) || [])[0] || "-", status: /filed|submitted/i.test(joined) ? "Filed" : (/not filed|pending/i.test(joined) ? "Not Filed" : "Unknown"), detail: joined.slice(0, 140) });
         }
       }
+      // ledger balance table: row = ["Electronic Cash Ledger", IGST, CGST, SGST, CESS]
+      for (const r of rows) {
+        const label = (r[0] || "").trim();
+        const total = r.slice(1).map(num).reduce((a, b) => a + b, 0);
+        if (/^Electronic Cash Ledger/i.test(label)) base.cashLedgerBalance = total;
+        else if (/^Electronic Credit Ledger/i.test(label)) base.creditLedgerBalance = total;
+        else if (/Liability Register/i.test(label)) base.liabilityBalance = total;
+      }
       const txt = await bodyText();
       base.dashboardTextSnippet = txt.slice(0, 900);
-      const cashM = txt.match(/Cash\s+Ledger[^\d\-]{0,60}([\d,]+\.\d{2})/i);
-      const itcM = txt.match(/ITC[^\d\-]{0,40}([\d,]+\.\d{2})/i);
-      if (cashM) base.cashLedgerBalance = num(cashM[1]);
-      if (itcM) base.creditLedgerBalance = num(itcM[1]);
-      logStep("auth-dash-text", txt.slice(0, 400));
+      logStep("auth-dash-balances", "cash=" + base.cashLedgerBalance + " itc=" + base.creditLedgerBalance + " liability=" + base.liabilityBalance);
     } catch (e) { logStep("auth-dash-err", e.message); }
   }
-
-  // ===== STEP 3: Cash Ledger (services quicklink, then payment subdomain) =====
-  try {
-    if (await visit(page, U.ledgersQuick, "Ledgers", "ledgers-quick", logStep)) {
-      const rows = await grabRows(3);
-      const v = balanceFromRows(rows);
-      if (v !== null) base.cashLedgerBalance = base.cashLedgerBalance || v;
-      const txt = await bodyText();
-      const cm = txt.match(/Cash[^\d\-]{0,40}([\d,]+\.\d{2})/i);
-      if (cm && !base.cashLedgerBalance) base.cashLedgerBalance = num(cm[1]);
-      const im = txt.match(/ITC[^\d\-]{0,40}([\d,]+\.\d{2})/i);
-      if (im && !base.creditLedgerBalance) base.creditLedgerBalance = num(im[1]);
-      logStep("ledgers-quick-balances", "cash=" + base.cashLedgerBalance + " itc=" + base.creditLedgerBalance + " txt=" + txt.slice(0, 250));
-    }
-    if (!base.cashLedgerBalance && await visit(page, U.cashLedger, "Cash Ledger", "cash-ledger", logStep)) {
-      await dumpTables(page, "cash-ledger");
-      const rows = await grabRows(3);
-      const v = balanceFromRows(rows);
-      if (v !== null) base.cashLedgerBalance = v;
-      const txt = await bodyText();
-      if (!v) {
-        const m = txt.match(/Balance[^\n\d]{0,60}([\d,]+\.\d{2})/i);
-        if (m) base.cashLedgerBalance = num(m[1]);
-      }
-      base.ledgerTextSnippet = txt.slice(0, 700);
-      logStep("cash-ledger-balance", base.cashLedgerBalance);
-    }
-  } catch (e) { logStep("cash-ledger-err", e.message); }
 
   // ===== STEP 2: Returns Dashboard (return subdomain) =====
   let onRetDash = await visit(page, U.returnsDash, "Returns Dashboard", "returns-dash", logStep);
@@ -540,23 +521,48 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
     s.gstr2bUrl = (await findLinkBy(page, "^GSTR-2B$"))?.href || U.gstr2bGuess;
     logStep("link-capture", "gstr1=" + s.gstr1Url + " gstr2b=" + s.gstr2bUrl);
     try {
+      // fill File Returns form: Financial Year / Quarter / Period, then SEARCH
+      const mm = parseInt((fp || "").slice(0, 2), 10);
+      const yy = parseInt((fp || "").slice(2, 6), 10);
+      if (mm >= 1 && mm <= 12 && yy >= 2017) {
+        const fyStart = mm >= 4 ? yy : yy - 1;
+        const fyLabel = fyStart + "-" + String(fyStart + 1).slice(2);
+        const quarter = mm >= 10 ? "Quarter 3 (Oct - Dec)" : mm >= 7 ? "Quarter 2 (Jul - Sep)" : mm >= 4 ? "Quarter 1 (Apr - Jun)" : "Quarter 4 (Jan - Mar)";
+        const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+        const sels = page.locator("select");
+        const nSel = await sels.count();
+        if (nSel >= 3) {
+          await sels.nth(0).selectOption({ label: fyLabel }).catch(async () => sels.nth(0).selectOption(fyLabel).catch(() => {}));
+          await sels.nth(1).selectOption({ label: quarter }).catch(async () => sels.nth(1).selectOption(quarter).catch(() => {}));
+          await sels.nth(2).selectOption({ label: months[mm - 1] }).catch(async () => sels.nth(2).selectOption(months[mm - 1]).catch(() => {}));
+          await page.waitForTimeout(800);
+          const searchBtn = page.locator("button:has-text('SEARCH'), button:has-text('Search'), input[type='submit']").first();
+          if (await searchBtn.isVisible({ timeout: 3000 })) {
+            await searchBtn.click({ timeout: 5000 }).catch(() => {});
+            logStep("returns-search", "fy=" + fyLabel + " q=" + quarter + " m=" + months[mm - 1]);
+          }
+        }
+        await page.waitForTimeout(8000);
+        await snap(page, "returns-after-search").catch(() => {});
+        await dumpTables(page, "returns-after-search");
+      }
       const rows = await grabRows(3);
-      for (const r of rows.slice(0, 30)) {
+      for (const r of rows.slice(0, 40)) {
         const joined = r.join(" ");
-        if (/GSTR-?1|GSTR-?3B|GSTR-?9|GSTR-?6/i.test(joined)) {
-          base.returnStatuses.push({ type: (joined.match(/GSTR-?\d+[A-Z]?/i) || [])[0] || "-", status: /filed|submitted/i.test(joined) ? "Filed" : (/not filed|pending/i.test(joined) ? "Not Filed" : "Unknown"), detail: joined.slice(0, 140) });
+        if (/GSTR-?1[^0-9]|GSTR-?3B|GSTR-?9[^0-9]|GSTR-?6[^0-9]|GSTR-?2B/i.test(joined)) {
+          base.returnStatuses.push({ type: (joined.match(/GSTR-?\d+[A-Z]?/i) || [])[0] || "-", status: /filed|submitted/i.test(joined) ? "Filed" : (/not filed|pending|nil/i.test(joined) ? "Not Filed" : "Unknown"), detail: joined.slice(0, 160) });
         }
       }
       const txt = await bodyText();
-      base.dashboardTextSnippet = txt.slice(0, 900);
+      base.returnsTextSnippet = txt.slice(0, 900);
       logStep("returns-dash-text", txt.slice(0, 350));
     } catch (e) { logStep("returns-dash-err", e.message); }
   }
 
 
-  // ===== STEP 3b: ITC (Input Tax Credit) Ledger =====
+  // ===== STEP 3b: ITC (Input Tax Credit) Ledger — only if auth dashboard had no ledger table =====
   try {
-    if (!base.creditLedgerBalance && await visit(page, U.itcLedger, "Liability Ledger", "itc-ledger", logStep)) {
+    if (!onAuthDash && await visit(page, U.itcLedger, "Liability Ledger", "itc-ledger", logStep)) {
       await dumpTables(page, "itc-ledger");
       const rows = await grabRows(3);
       const v = balanceFromRows(rows);
@@ -573,6 +579,8 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
   // ===== STEP 4: Notices / Intimations =====
   try {
     if (await visit(page, U.notices, "Notices / Intimation", "notices", logStep)) {
+      await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
+      await page.waitForTimeout(4000);
       const rows = await grabRows(3);
       logStep("notices-rows", "rawRows=" + rows.length);
       for (const r of rows.slice(0, 25)) {
@@ -588,6 +596,7 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
 
   // ===== STEP 5: GSTR-2B (TDS/TCS credit) =====
   try {
+    await page.waitForTimeout(8000); // spacing between subdomain hops (WAF rate)
     if (await visit(page, s.gstr2bUrl || U.gstr2bGuess, "GSTR-2B", "gstr2b-page", logStep)) {
       // period select?
       let viewed = false;
@@ -617,6 +626,8 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
       } catch (e) { logStep("gstr2b-period-err", e.message); }
       logStep("gstr2b-viewed", String(viewed));
       if (viewed) { await snap(page, "gstr2b-statement").catch(() => {}); await dumpTables(page, "gstr2b-statement"); }
+      await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
+      await page.waitForTimeout(3000);
       const rows = await grabRows(4);
       for (const r of rows.slice(0, 40)) {
         const joined = r.join(" ");

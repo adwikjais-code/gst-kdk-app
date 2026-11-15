@@ -18710,9 +18710,14 @@ function buildEtsyPdfReport(opts) {
               </tr>`);
           });
 
-          const gStatus = cd.gstr1Upload
+          const gStatusBase = cd.gstr1Upload
             ? `<span class="px-2.5 py-1 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">✅ Uploaded (${cd.gstr1Upload.refId || "Done"})</span>`
             : `<span class="px-2.5 py-1 rounded-full text-[10px] font-semibold bg-slate-100 text-slate-600">No Queued File</span>`;
+          const retChips = (cd.returnStatuses || []).slice(0, 8).map((rs) => {
+            const col = /Filed$/i.test(rs.status || "") ? "bg-emerald-50 text-emerald-700 border-emerald-200" : (/Not Filed/i.test(rs.status || "") ? "bg-rose-50 text-rose-700 border-rose-200" : "bg-slate-50 text-slate-600 border-slate-200");
+            return `<span class="inline-block px-2 py-0.5 rounded-full text-[10px] font-bold border ${col} mb-1 mr-1">${rs.type} (${cd.fp || "-"}) : ${rs.status}</span>`;
+          }).join("");
+          const gStatus = gStatusBase + (retChips ? `<div class="mt-1.5">${retChips}</div>` : "");
 
           dlHtml.push(`
             <tr class="hover:bg-slate-50">
@@ -19013,8 +19018,10 @@ function buildEtsyPdfReport(opts) {
           renderKdkHubData();
           if (typeof renderApp === "function") renderApp();
 
+          const _cash = Number(j.data.cashLedgerBalance || 0);
+          const _itc = Number(j.data.creditLedgerBalance || 0);
           showKdkBanner(
-            `✅ <b>${kdkCurrentSession.cleanName}</b> Synced! TDS/TCS: ${(j.data.tdsTcsRecords || []).length} | Notices: ${(j.data.notices || []).length}`,
+            `✅ <b>${kdkCurrentSession.cleanName}</b> Synced! Cash: ₹${_cash.toLocaleString("en-IN")} | ITC: ₹${_itc.toLocaleString("en-IN")} | TDS/TCS: ${(j.data.tdsTcsRecords || []).length} | Notices: ${(j.data.notices || []).length}`,
             "ok"
           );
 
