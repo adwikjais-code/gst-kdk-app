@@ -21,7 +21,18 @@ const path = require("path");
 const { load, save, DATA_DIR } = require("./store");
 
 const LOGIN_URL = process.env.LOGIN_URL || "https://services.gst.gov.in/services/login";
-const DASH_URL = process.env.DASH_URL || "https://services.gst.gov.in/services/dash";
+// ---- verified live-portal URLs (menu-anchored, 2026-11-15) ----
+const U = {
+  home: "https://www.gst.gov.in/",
+  authDash: "https://services.gst.gov.in/services/auth/dashboard",
+  returnsDash: process.env.RETURNS_DASH_URL || "https://return.gst.gov.in/returns/auth/dashboard",
+  cashLedger: process.env.CASH_LEDGER_URL || "https://payment.gst.gov.in/payment/auth/ledger/cashledger",
+  itcLedger: process.env.ITC_LEDGER_URL || "https://return.gst.gov.in/returns/auth/ledger/taxledger",
+  notices: process.env.NOTICES_URL || "https://services.gst.gov.in/services2/auth/getlistofnotices",
+  gstr1Guess: "https://return.gst.gov.in/returns/auth/gstr1",
+  gstr2bGuess: "https://return.gst.gov.in/returns/auth/gstr2b",
+};
+const DASH_URL = U.returnsDash;
 const HEADLESS = String(process.env.HEADLESS || "true").toLowerCase() !== "false";
 const STEP_TIMEOUT = Number(process.env.STEP_TIMEOUT_MS || 30000);
 
@@ -288,11 +299,89 @@ async function pngDataUrl(page, file) {
 }
 
 // ---------- scraping (best-effort, portal DOM varies) ----------
+// ---------- live-portal helpers ----------
+async function dismissPopup(page) {
+  try {
+    const p = page.locator("#lbnrPopup");
+    if (await p.isVisible({ timeout: 800 })) {
+      const btn = p.locator("button, a").first();
+      if (await btn.isVisible({ timeout: 1000 })) await btn.click({ timeout: 2000 }).catch(() => {});
+      else await p.evaluate((el) => el.remove()).catch(() => {});
+      await page.waitForTimeout(700);
+    }
+  } catch { /* ignore */ }
+}
+async function gotoSettle(page, url, tag, logStep) {
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: STEP_TIMEOUT });
+    await page.waitForTimeout(4500);
+    await dismissPopup(page);
+    await snap(page, tag).catch(() => {});
+    let final = "";
+    try { final = page.url(); } catch { /* ignore */ }
+    logStep(tag, "url=" + final);
+    return !/\/login|notfound|error/i.test(final);
+  } catch (e) {
+    logStep(tag + "-err", e.message);
+    await snap(page, tag + "-err").catch(() => {});
+    return false;
+  }
+}
+async function findLinkBy(page, reSrc) {
+  try {
+    return await page.evaluate((reS) => {
+      const re = new RegExp(reS, "i");
+      for (const a of document.querySelectorAll("a")) {
+        const t = (a.innerText || "").replace(/\s+/g, " ").trim();
+        if (t && re.test(t) && a.href && !a.href.endsWith("#")) return { text: t.slice(0, 60), href: a.href };
+      }
+      return null;
+    }, reSrc);
+  } catch { return null; }
+}
+async function dumpTables(page, name) {
+  try {
+    const tables = await page.evaluate(() =>
+      [...document.querySelectorAll("table")].slice(0, 12).map((tb) =>
+        [...tb.querySelectorAll("tr")].slice(0, 25).map((tr) =>
+          [...tr.querySelectorAll("th,td")].map((c) => c.innerText.trim().replace(/\s+/g, " ").slice(0, 60))
+        )
+      )
+    );
+    let url = "";
+    try { url = page.url(); } catch { /* ignore */ }
+    fs.writeFileSync(path.join(DEBUG_DIR, `last-tables-${name}.json`), JSON.stringify({ name, url, tables }, null, 1));
+  } catch { /* ignore */ }
+}
+async function dumpAnchors(page, name) {
+  try {
+    const anchors = await page.evaluate(() =>
+      [...document.querySelectorAll("a")]
+        .map((a) => ({ text: (a.innerText || "").replace(/\s+/g, " ").trim().slice(0, 60), href: a.href || "" }))
+        .filter((a) => a.text && a.href && !a.href.endsWith("#"))
+        .filter((v, i, arr) => arr.findIndex((x) => x.text === v.text && x.href === v.href) === i)
+    );
+    fs.writeFileSync(path.join(DEBUG_DIR, `last-anchors-${name}.json`), JSON.stringify(anchors, null, 1));
+  } catch { /* ignore */ }
+}
+function balanceFromRows(rows) {
+  for (const r of rows) {
+    if (/balance/i.test(r.join(" "))) {
+      for (let i = r.length - 1; i >= 0; i--) {
+        const v = num(r[i]);
+        if (r[i].trim() !== "" && v !== 0) return v;
+      }
+    }
+  }
+  return null;
+}
+
 async function scrapeAll(s, page, fp, autoUploadGstr1) {
   const base = {
     gstin: s.gstin, clientName: s.clientName, fp: fp || "",
     syncedAt: iso(), cashLedgerBalance: 0, creditLedgerBalance: 0,
     tdsTcsRecords: [], notices: [], gstr1Upload: null, source: "kdk-engine-live",
+    returnStatuses: [],
   };
 
   // ---- debug trace (written to data/debug/last-scrape-trace.json) ----
@@ -300,7 +389,7 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
   const logStep = (step, detail) => {
     let url = "";
     try { url = page.url(); } catch (e) {}
-    trace.push({ step, url, detail: detail ? String(detail).slice(0, 300) : "", at: new Date().toISOString() });
+    trace.push({ step, url, detail: detail ? String(detail).slice(0, 400) : "", at: new Date().toISOString() });
   };
   const flushTrace = () => {
     try {
@@ -309,7 +398,6 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
     } catch (e) {}
   };
 
-  // helper: grab all visible table rows (>= n cols)
   const grabRows = (minCols = 3) => page.evaluate((mc) => {
     const out = [];
     document.querySelectorAll("table tr").forEach((tr) => {
@@ -318,89 +406,133 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
     });
     return out;
   }, minCols);
+  const bodyText = () => page.evaluate(() => document.body.innerText || "");
+  const GSTIN_RE = /[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]/;
 
-  // helper: click a menu item by text, wait for content
-  async function clickMenu(label, waitMs = 4500) {
-    const candidates = [
-      `li:has-text('${label}')`, `a:has-text('${label}')`, `span:has-text('${label}')`,
-      `[class*='menu' i] :has-text('${label}')`, `text=${label}`,
-    ];
-    for (const sel of candidates) {
-      try {
-        const el = page.locator(sel).last();
-        if (await el.isVisible({ timeout: 1200 })) {
-          await el.click({ timeout: 5000 });
-          await page.waitForTimeout(waitMs);
-          return true;
+  // ===== STEP 1: Returns Dashboard (GSTR-1/3B status + nav link capture) =====
+  let onRetDash = await gotoSettle(page, U.returnsDash, "returns-dash", logStep);
+  if (onRetDash) {
+    await dumpAnchors(page, "returns-dash");
+    await dumpTables(page, "returns-dash");
+    s.gstr1Url = (await findLinkBy(page, "^GSTR-1$"))?.href || U.gstr1Guess;
+    s.gstr2bUrl = (await findLinkBy(page, "^GSTR-2B$"))?.href || U.gstr2bGuess;
+    logStep("link-capture", "gstr1=" + s.gstr1Url + " gstr2b=" + s.gstr2bUrl);
+    try {
+      const rows = await grabRows(3);
+      for (const r of rows.slice(0, 30)) {
+        const joined = r.join(" ");
+        if (/GSTR-?1|GSTR-?3B|GSTR-?9|GSTR-?6/i.test(joined)) {
+          base.returnStatuses.push({ type: (joined.match(/GSTR-?\d+[A-Z]?/i) || [])[0] || "-", status: /filed|submitted/i.test(joined) ? "Filed" : (/not filed|pending/i.test(joined) ? "Not Filed" : "Unknown"), detail: joined.slice(0, 140) });
         }
-      } catch { /* next */ }
-    }
-    return false;
+      }
+      const txt = await bodyText();
+      base.dashboardTextSnippet = txt.slice(0, 900);
+      logStep("returns-dash-text", txt.slice(0, 350));
+    } catch (e) { logStep("returns-dash-err", e.message); }
   }
 
-  // 0) ensure we are on dashboard
+  // ===== STEP 2: Cash Ledger =====
   try {
-    if (!/dash/i.test(page.url())) await page.goto(DASH_URL, { waitUntil: "domcontentloaded", timeout: STEP_TIMEOUT });
-    await page.waitForTimeout(4000);
-    await snap(page, "dash-landed");
-  } catch (e) { await snap(page, "dash-err").catch(() => {}); }
-
-  try {
-    const menuInfo = await page.evaluate(() => {
-      const links = [...document.querySelectorAll("a, li, button, span")].map(el => (el.innerText || "").trim())
-        .filter(t => t && t.length > 1 && t.length < 40);
-      const uniq = [...new Set(links)];
-      return { count: uniq.length, sample: uniq.slice(0, 80) };
-    });
-    logStep("dash-menu-scan", JSON.stringify({ url: page.url(), linkCount: menuInfo.count }));
-    fs.writeFileSync(path.join(DEBUG_DIR, "last-menu-texts.json"), JSON.stringify(menuInfo, null, 1));
-  } catch (e) { logStep("dash-menu-scan-err", e.message); }
-
-  // 1) Ledger balances from dashboard text
-  try {
-    const bodyText = await page.evaluate(() => document.body.innerText || "");
-    const cashM = bodyText.match(/Cash Ledger[^\d\-]*([\-0-9,\.]+)/i) || bodyText.match(/Cash Balance[^\d\-]*([\-0-9,\.]+)/i);
-    const creditM = bodyText.match(/Input Tax Credit[^\d\-]*([\-0-9,\.]+)/i) || bodyText.match(/ITC[^\d\-]*([\-0-9,\.]+)/i);
-    base.cashLedgerBalance = cashM ? num(cashM[1]) : 0;
-    base.creditLedgerBalance = creditM ? num(creditM[1]) : 0;
-    base.dashboardTextSnippet = bodyText.slice(0, 800);
-    logStep("ledger-scan", JSON.stringify({ cash: base.cashLedgerBalance, credit: base.creditLedgerBalance, bodyLen: bodyText.length, bodyStart: bodyText.slice(0, 300) }));
-  } catch (e) { logStep("ledger-err", e.message); }
-
-  // 2) Notices — try menu then tables on dashboard
-  try {
-    let rows = await grabRows(4);
-    if (!rows.length) {
-      if (await clickMenu("Notices")) rows = await grabRows(4);
+    if (await gotoSettle(page, U.cashLedger, "cash-ledger", logStep)) {
+      await dumpTables(page, "cash-ledger");
+      const rows = await grabRows(3);
+      const v = balanceFromRows(rows);
+      if (v !== null) base.cashLedgerBalance = v;
+      const txt = await bodyText();
+      if (!v) {
+        const m = txt.match(/Balance[^\n\d]{0,60}([\d,]+\.\d{2})/i);
+        if (m) base.cashLedgerBalance = num(m[1]);
+      }
+      base.ledgerTextSnippet = txt.slice(0, 700);
+      logStep("cash-ledger-balance", base.cashLedgerBalance);
     }
-    for (const tds of rows.slice(0, 15)) {
-      if (/notice|demand|intimation|DRC|ADT|ASMT/i.test(tds.join(" "))) {
+  } catch (e) { logStep("cash-ledger-err", e.message); }
+
+  // ===== STEP 3: ITC (Input Tax Credit) Ledger =====
+  try {
+    if (await gotoSettle(page, U.itcLedger, "itc-ledger", logStep)) {
+      await dumpTables(page, "itc-ledger");
+      const rows = await grabRows(3);
+      const v = balanceFromRows(rows);
+      if (v !== null) base.creditLedgerBalance = v;
+      const txt = await bodyText();
+      if (!v) {
+        const m = txt.match(/Balance[^\n\d]{0,60}([\d,]+\.\d{2})/i);
+        if (m) base.creditLedgerBalance = num(m[1]);
+      }
+      logStep("itc-ledger-balance", base.creditLedgerBalance);
+    }
+  } catch (e) { logStep("itc-ledger-err", e.message); }
+
+  // ===== STEP 4: Notices / Intimations =====
+  try {
+    if (await gotoSettle(page, U.notices, "notices", logStep)) {
+      await dumpTables(page, "notices");
+      const rows = await grabRows(3);
+      logStep("notices-rows", "rawRows=" + rows.length);
+      for (const r of rows.slice(0, 25)) {
+        const joined = r.join(" ");
+        if (/^(Ref|No\.|Type|Date|Sr)/i.test(r[0] || "")) continue; // header row
         base.notices.push({
-          refId: tds[0] || "NOTICE", type: tds[1] || "Notice", description: tds[2] || "",
-          issueDate: tds[3] || "-", dueDate: tds[4] || "-", status: "Pending Action",
+          refId: r[0] || "NOTICE", type: r[1] || "Notice", description: r[2] || "",
+          issueDate: r[3] || "-", dueDate: r[4] || "-", status: /respond|reply|pending/i.test(joined) ? "Pending Action" : "Viewed",
         });
       }
     }
-  } catch (e) { logStep("notices-err", e.message); await snap(page, "notices-err").catch(() => {}); }
-  logStep("notices-done", "notices=" + base.notices.length);
+  } catch (e) { logStep("notices-err", e.message); }
 
-  // 3) TDS/TCS (GSTR-2B / RCM) — menu then tables
+  // ===== STEP 5: GSTR-2B (TDS/TCS credit) =====
   try {
-    if (await clickMenu("GSTR-2B")) {
+    if (await gotoSettle(page, s.gstr2bUrl || U.gstr2bGuess, "gstr2b-page", logStep)) {
+      await dumpAnchors(page, "gstr2b-page");
+      await dumpTables(page, "gstr2b-page");
+      // period select?
+      let viewed = false;
+      try {
+        const sels = page.locator("select");
+        const n = await sels.count();
+        for (let i = 0; i < n && !viewed; i++) {
+          const sel = sels.nth(i);
+          if (await sel.isVisible().catch(() => false)) {
+            const opts = await sel.locator("option").allInnerTexts().catch(() => []);
+            const fpLabel = (fp || "").replace(/^0/, ""); // 102026 -> 10/2026 handled below
+            const target = (fp || "").replace(/^(\d{2})(\d{4})$/, "$1/$2");
+            if (opts.some((o) => o.trim().replace(/^0/, "") === target.replace(/^0/, "") || o.trim() === target)) {
+              await sel.selectOption({ label: opts.find((o) => o.trim() === target) || target }).catch(async () => {
+                await sel.selectOption(target).catch(() => {});
+              });
+              await page.waitForTimeout(1000);
+              const btn = page.locator("button:has-text('View'), button:has-text('Download'), button:has-text('Submit')").first();
+              if (await btn.isVisible({ timeout: 3000 })) {
+                await btn.click({ timeout: 5000 }).catch(() => {});
+                await page.waitForTimeout(6000);
+                viewed = true;
+              }
+            }
+          }
+        }
+      } catch (e) { logStep("gstr2b-period-err", e.message); }
+      logStep("gstr2b-viewed", String(viewed));
+      if (viewed) { await snap(page, "gstr2b-statement").catch(() => {}); await dumpTables(page, "gstr2b-statement"); }
       const rows = await grabRows(4);
-      for (const tds of rows.slice(0, 15)) {
-        const total = num(tds[tds.length - 1]);
-        if (!total && !/tcs|tds/i.test(tds.join(" "))) continue;
+      for (const r of rows.slice(0, 40)) {
+        const joined = r.join(" ");
+        if (!GSTIN_RE.test(joined)) continue;
+        const g = (joined.match(GSTIN_RE) || [])[0];
+        const name = r.find((c) => c.length > 3 && !GSTIN_RE.test(c) && !/^[0-9,./\-\s]+$/.test(c)) || "-";
+        const amounts = r.map(num).filter((v) => v !== 0);
+        if (!amounts.length) continue;
         base.tdsTcsRecords.push({
-          type: /tcs/i.test(tds.join(" ")) ? "TCS" : "TDS", ctin: tds[0] || "-", cname: tds[1] || "-",
-          net: num(tds[2]), iamt: num(tds[3]), camt: 0, samt: 0, totalCredit: total, status: "Pending Action",
+          type: /TCS/i.test(joined) ? "TCS" : "TDS", ctin: g, cname: name,
+          net: amounts[0] || 0, iamt: 0, camt: 0, samt: 0, totalCredit: amounts[amounts.length - 1] || 0,
+          status: "Pending Action",
         });
       }
+      logStep("gstr2b-records", base.tdsTcsRecords.length);
     }
-  } catch (e) { logStep("gstr2b-err", e.message); await snap(page, "gstr2b-err").catch(() => {}); }
-  logStep("gstr2b-done", "records=" + base.tdsTcsRecords.length);
+  } catch (e) { logStep("gstr2b-err", e.message); }
 
-  // 4) GSTR-1 auto-upload (queued JSON)
+  // ===== STEP 6: GSTR-1 auto-upload (queued JSON) =====
   if (autoUploadGstr1) {
     const store = load();
     const q = store.gstr1Queue[s.gstin + "_" + (fp || "")];
@@ -408,28 +540,33 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
       try {
         const tmp = path.join(DATA_DIR, `gstr1_${s.gstin}_${Date.now()}.json`);
         fs.writeFileSync(tmp, q.jsonContent);
-        let opened = await clickMenu("GSTR-1");
+        await gotoSettle(page, s.gstr1Url || U.gstr1Guess, "gstr1-page", logStep);
+        await dumpAnchors(page, "gstr1-page");
+        await dumpTables(page, "gstr1-page");
         const fileInput = page.locator("input[type='file']").first();
-        if (opened && await fileInput.isVisible({ timeout: 8000 })) {
+        if (await fileInput.isVisible({ timeout: 8000 })) {
           await fileInput.setInputFiles(tmp);
-          await page.waitForTimeout(2000);
+          await page.waitForTimeout(2500);
           const submit = page.locator("button:has-text('Submit'), input[type='submit']").first();
           if (await submit.isVisible({ timeout: 5000 })) {
             await submit.click();
-            await page.waitForTimeout(10000);
-            const ack = (await page.evaluate(() => document.body.innerText || "")).match(/(ACK[A-Z0-9]{8,})/i);
+            await page.waitForTimeout(12000);
+            const txt = await bodyText();
+            const ack = txt.match(/(ACK[A-Z0-9]{6,})/i);
             q.status = "UPLOADED";
             q.uploadRefId = ack ? ack[1] : "SUBMITTED";
             q.uploadedAt = iso();
             save();
             base.gstr1Upload = { status: "UPLOADED", refId: q.uploadRefId, fileName: q.fileName, fp: fp || "", uploadedAt: q.uploadedAt, mode: "Auto-Upload (KDK Engine)" };
+            logStep("gstr1-uploaded", q.uploadRefId);
           }
         } else {
-          base.gstr1Upload = { status: "PENDING", refId: "", fileName: q.fileName, error: "GSTR-1 page ka file-upload nahi mila (menu/selector update chahiye)" };
-          await snap(page, "gstr1-nofind").catch(() => {});
+          base.gstr1Upload = { status: "PENDING", refId: "", fileName: q.fileName, error: "GSTR-1 page par file-upload input nahi mila (URL/step debug kar raha hoon)" };
+          logStep("gstr1-no-file-input", "url=" + page.url());
         }
       } catch (e) {
         base.gstr1Upload = { status: "FAILED", refId: "", fileName: q.fileName, error: e.message };
+        logStep("gstr1-upload-err", e.message);
         await snap(page, "gstr1-upload-err").catch(() => {});
       }
     }
