@@ -1,0 +1,22 @@
+{
+  "name": "kdk-gst-engine",
+  "version": "1.0.0",
+  "description": "KDK-style background GST engine: headless portal login (captcha + SMS OTP), auto data sync, GSTR-1 auto-upload, 1-click downloads. Plugs into the GST Tracker web app.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "demo": "MODE=demo node server.js",
+    "live": "MODE=live node server.js",
+    "setup:browser": "npx playwright install chromium --with-deps"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  },
+  "optionalDependencies": {
+    "playwright": "^1.45.0"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}
