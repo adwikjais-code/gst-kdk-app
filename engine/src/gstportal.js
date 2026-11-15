@@ -546,16 +546,26 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
         await snap(page, "returns-after-search").catch(() => {});
         await dumpTables(page, "returns-after-search");
       }
-      const rows = await grabRows(3);
-      for (const r of rows.slice(0, 40)) {
-        const joined = r.join(" ");
-        if (/GSTR-?1[^0-9]|GSTR-?3B|GSTR-?9[^0-9]|GSTR-?6[^0-9]|GSTR-?2B/i.test(joined)) {
-          base.returnStatuses.push({ type: (joined.match(/GSTR-?\d+[A-Z]?/i) || [])[0] || "-", status: /filed|submitted/i.test(joined) ? "Filed" : (/not filed|pending|nil/i.test(joined) ? "Not Filed" : "Unknown"), detail: joined.slice(0, 160) });
-        }
-      }
       const txt = await bodyText();
-      base.returnsTextSnippet = txt.slice(0, 900);
-      logStep("returns-dash-text", txt.slice(0, 350));
+      base.returnsTextSnippet = txt.slice(0, 1200);
+      // cards are divs, not tables — regex over body text
+      const today = new Date();
+      const todayStr = today.getFullYear() + "/" + String(today.getMonth() + 1).padStart(2, "0") + "/" + String(today.getDate()).padStart(2, "0");
+      const dueStatus = (d) => {
+        // d like 11/11/2026
+        const p = d.split("/").map(Number);
+        const due = new Date(p[2], p[1] - 1, p[0]);
+        const past = due < new Date(today.getFullYear(), today.getMonth(), today.getDate());
+        return { past, label: past ? "OVERDUE" : "Pending" };
+      };
+      const g1 = txt.match(/GSTR-1[^\n]{0,40}\n?\s*Due Date\s*-\s*([0-9]{1,2}\/[0-9]{1,2}\/[0-9]{4})/i);
+      if (g1) { const st = dueStatus(g1[1]); base.returnStatuses.push({ type: "GSTR-1", status: (st.past ? "Not Filed — OVERDUE" : "Not Filed") + " (Due " + g1[1] + ")", dueDate: g1[1], detail: "PREPARE ONLINE/OFFLINE available" }); }
+      else if (/GSTR-1\s*(File|View)\b/i.test(txt)) base.returnStatuses.push({ type: "GSTR-1", status: "Filed", dueDate: "-", detail: "" });
+      const g3b = txt.match(/GSTR-3B[^\n]{0,40}\n?\s*Due Date\s*-\s*([0-9]{1,2}\/[0-9]{1,2}\/[0-9]{4})/i);
+      if (g3b) { const st = dueStatus(g3b[1]); base.returnStatuses.push({ type: "GSTR-3B", status: (st.past ? "Not Filed — OVERDUE" : "Not Filed") + " (Due " + g3b[1] + ")", dueDate: g3b[1], detail: "PREPARE ONLINE/OFFLINE available" }); }
+      if (/GSTR-2B/i.test(txt)) base.returnStatuses.push({ type: "GSTR-2B", status: "Auto-drafted Available", dueDate: "-", detail: "VIEW/DOWNLOAD on Returns Dashboard" });
+      if (/GSTR-2A/i.test(txt)) base.returnStatuses.push({ type: "GSTR-2A", status: "Auto-drafted Available", dueDate: "-", detail: "VIEW/DOWNLOAD (view only)" });
+      logStep("returns-cards", "status=" + base.returnStatuses.length + " | " + base.returnStatuses.map((r) => r.type + ":" + r.status).join(", "));
     } catch (e) { logStep("returns-dash-err", e.message); }
   }
 
@@ -582,7 +592,8 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
       await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
       await page.waitForTimeout(4000);
       const rows = await grabRows(3);
-      logStep("notices-rows", "rawRows=" + rows.length);
+      const ntxt = await bodyText();
+      logStep("notices-rows", "rawRows=" + rows.length + " | txt=" + ntxt.slice(0, 300));
       for (const r of rows.slice(0, 25)) {
         const joined = r.join(" ");
         if (/^(Ref|No\.|Type|Date|Sr)/i.test(r[0] || "")) continue; // header row
@@ -594,10 +605,59 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
     }
   } catch (e) { logStep("notices-err", e.message); }
 
-  // ===== STEP 5: GSTR-2B (TDS/TCS credit) =====
+  // ===== STEP 5: GSTR-2B (TDS/TCS credit) — via Returns Dashboard card VIEW button =====
+  let onGstr2b = false;
   try {
-    await page.waitForTimeout(8000); // spacing between subdomain hops (WAF rate)
-    if (await visit(page, s.gstr2bUrl || U.gstr2bGuess, "GSTR-2B", "gstr2b-page", logStep)) {
+    // are we still on returns dashboard? go back if not
+    let cur = ""; try { cur = page.url(); } catch { /* ignore */ }
+    if (!/returns\/auth\/dashboard/i.test(cur)) {
+      if (await visit(page, U.returnsDash, "Returns Dashboard", "returns-pre2b", logStep)) {
+        const mm2 = parseInt((fp || "").slice(0, 2), 10), yy2 = parseInt((fp || "").slice(2, 6), 10);
+        if (mm2 >= 1 && mm2 <= 12 && yy2 >= 2017) {
+          const fyS = mm2 >= 4 ? yy2 : yy2 - 1;
+          const fyL = fyS + "-" + String(fyS + 1).slice(2);
+          const qtr = mm2 >= 10 ? "Quarter 3 (Oct - Dec)" : mm2 >= 7 ? "Quarter 2 (Jul - Sep)" : mm2 >= 4 ? "Quarter 1 (Apr - Jun)" : "Quarter 4 (Jan - Mar)";
+          const mons = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+          const s2 = page.locator("select");
+          if ((await s2.count()) >= 3) {
+            await s2.nth(0).selectOption({ label: fyL }).catch(() => {});
+            await s2.nth(1).selectOption({ label: qtr }).catch(() => {});
+            await s2.nth(2).selectOption({ label: mons[mm2 - 1] }).catch(() => {});
+            const sb = page.locator("button:has-text('SEARCH')").first();
+            if (await sb.isVisible({ timeout: 3000 })) await sb.click({ timeout: 5000 }).catch(() => {});
+            await page.waitForTimeout(8000);
+          }
+        }
+      }
+    }
+    // click VIEW inside the GSTR-2B card
+    const clicked2b = await page.evaluate(() => {
+      const containers = [...document.querySelectorAll("div, section, td")].filter((el) => {
+        const t = el.innerText || "";
+        return /GSTR-2B/i.test(t) && /VIEW/i.test(t) && t.length < 800;
+      });
+      if (!containers.length) return "no-card";
+      containers.sort((a, b) => (a.innerText || "").length - (b.innerText || "").length);
+      const card = containers[0];
+      const btn = [...card.querySelectorAll("button, a, input")].find((b) => ((b.innerText || b.value || "") + "").trim().toUpperCase() === "VIEW");
+      if (btn) { btn.click(); return "clicked"; }
+      return "no-btn";
+    });
+    logStep("gstr2b-view-click", clicked2b);
+    if (clicked2b === "clicked") {
+      await page.waitForTimeout(10000);
+      await snap(page, "gstr2b-statement").catch(() => {});
+      await dumpTables(page, "gstr2b-statement");
+      await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
+      onGstr2b = true;
+    }
+    if (!onGstr2b) {
+      await page.waitForTimeout(8000); // spacing between subdomain hops (WAF rate)
+      if (await visit(page, s.gstr2bUrl || U.gstr2bGuess, "GSTR-2B", "gstr2b-page", logStep)) {
+        onGstr2b = true;
+      }
+    }
+    if (onGstr2b) {
       // period select?
       let viewed = false;
       try {
