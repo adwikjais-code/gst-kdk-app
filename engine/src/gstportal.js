@@ -646,9 +646,17 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
     logStep("gstr2b-view-click", clicked2b);
     if (clicked2b === "clicked") {
       await page.waitForTimeout(8000);
+      // adaptive wait: gstr2b subdomain is a heavy Angular app — poll until content renders
+      let renderedLen = 0;
+      for (let i = 0; i < 9; i++) {
+        renderedLen = await page.evaluate(() => (document.body.innerText || "").trim().length).catch(() => 0);
+        if (renderedLen > 400) break;
+        await page.waitForTimeout(3000);
+      }
       await snap(page, "gstr2b-statement").catch(() => {});
       await dumpTables(page, "gstr2b-statement");
-      await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
+      const g2bTxt = await page.evaluate(() => (document.body.innerText || "").trim().slice(0, 400)).catch(() => "");
+      logStep("gstr2b-render", "len=" + renderedLen + " | " + g2bTxt.slice(0, 300));
       onGstr2b = true;
     }
     if (!onGstr2b) {
