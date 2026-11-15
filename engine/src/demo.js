@@ -271,5 +271,6 @@ function results() {
   return { ok: true, mode: "demo", store: { clients: store.clients, gstr1Queue: store.gstr1Queue } };
 }
 
+function progress(sessionId) { return { ok: true, stage: "demo", progress: { label: "Demo data update ho raha hai", pct: 50, stage: "demo", at: new Date().toISOString() } }; }
 function clients() { return { ok: true, mode: "demo", clients: [] }; }
-module.exports = { initLogin, submitSync, downloadItem, queueGstr1, status, results, clients, SESSIONS };
+module.exports = { initLogin, submitSync, downloadItem, queueGstr1, status, results, clients, progress, SESSIONS };

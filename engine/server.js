@@ -66,6 +66,10 @@ app.get("/api/kdk/results", (req, res) => {
 });
 
 // --- login flow ---
+app.get("/api/kdk/progress", (req, res) => {
+  try { res.json(engine.progress(req.query.sessionId || "")); }
+  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
 app.get("/api/kdk/clients", (req, res) => {
   try { res.json(engine.clients()); }
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }

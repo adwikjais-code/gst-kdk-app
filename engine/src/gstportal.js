@@ -242,6 +242,7 @@ async function submitSync({ sessionId, captcha, fp, autoUploadGstr1, keepAliveFo
       const inp = await firstVisible(page, SEL.captchaInput, 8000);
       await inp.fill(code);
       await (await firstVisible(page, SEL.loginBtn, 8000)).click();
+      s.progress = { label: "Captcha verify ho raha hai (portal)", pct: 8, stage: "captcha", at: iso() };
       await page.waitForTimeout(4000);
       const state = await detectStage(page);
 
@@ -277,6 +278,7 @@ async function submitSync({ sessionId, captcha, fp, autoUploadGstr1, keepAliveFo
       const inp = await firstVisible(page, SEL.otpInput, 8000);
       await inp.fill(code);
       await (await firstVisible(page, SEL.otpBtn, 8000)).click();
+      s.progress = { label: "OTP verify ho raha hai (portal)", pct: 5, stage: "otp", at: iso() };
       await page.waitForTimeout(5000);
       const state = await detectStage(page);
       if (state !== "dashboard") {
@@ -468,6 +470,12 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
     returnStatuses: [],
   };
 
+  // ---- live progress (polled by frontend for "data updating" UI) ----
+  const setProg = (label, pct, stage) => {
+    try { s.progress = { label, pct, stage: stage || label, at: iso() }; } catch (e) {}
+  };
+  setProg("Login complete — data fetch shuru ho raha hai", 10, "start");
+
   // ---- debug trace (written to data/debug/last-scrape-trace.json) ----
   const trace = [];
   const logStep = (step, detail) => {
@@ -500,6 +508,7 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
   const GSTIN_RE = /[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]/;
 
   // ===== STEP 0: Home + cookie/session proof =====
+  setProg("Portal session verify ho raha hai", 15, "home");
   await visit(page, U.home, "Home", "home", logStep);
   try {
     const cookies = await page.context().cookies();
@@ -512,6 +521,7 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
   } catch (e) {}
 
   // ===== STEP 1: Auth Dashboard (services subdomain — session is valid here) =====
+  setProg("Ledger Balance (Cash/ITC) laa rahe hain", 30, "ledger");
   let onAuthDash = await visit(page, U.authDash, "Dashboard", "auth-dash", logStep);
   if (onAuthDash) {
     try {
@@ -537,6 +547,7 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
   }
 
   // ===== STEP 2: Returns Dashboard (return subdomain) =====
+  setProg("GSTR-1 / GSTR-3B filing status check ho raha hai", 45, "returns");
   let onRetDash = await visit(page, U.returnsDash, "Returns Dashboard", "returns-dash", logStep);
   if (onRetDash) {
     s.gstr1Url = (await findLinkBy(page, "^GSTR-1$"))?.href || s.gstr1Url || U.gstr1Guess;
@@ -609,6 +620,7 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
   } catch (e) { logStep("itc-ledger-err", e.message); }
 
   // ===== STEP 4: Notices / Intimations =====
+  setProg("Portal Notices check ho rahe hain", 60, "notices");
   try {
     if (await visit(page, U.notices, "Notices / Intimation", "notices", logStep)) {
       await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
@@ -628,6 +640,7 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
   } catch (e) { logStep("notices-err", e.message); }
 
   // ===== STEP 5: GSTR-2B (TDS/TCS credit) — via Returns Dashboard card VIEW button =====
+  setProg("GSTR-2B download + TDS/TCS (Etsy TCS) fetch ho raha hai", 75, "gstr2b");
   let onGstr2b = false;
   try {
     // are we still on returns dashboard? go back if not
@@ -871,6 +884,7 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
   } catch (e) { logStep("eco-supplies-err", e.message); }
 
   // ===== STEP 6: GSTR-1 auto-upload (queued JSON) =====
+  if (autoUploadGstr1) setProg("Final check + GSTR-1 queue process ho raha hai", 90, "gstr1");
   if (autoUploadGstr1) {
     const store = load();
     const q = store.gstr1Queue[s.gstin + "_" + (fp || "")];
@@ -915,6 +929,7 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
 
   await snap(page, "scrape-done").catch(() => {});
   flushTrace();
+  setProg("Data tayaar ho gaya — app me push ho raha hai", 100, "done");
   return base;
 }
 
@@ -956,6 +971,11 @@ function status() {
   for (const s of SESSIONS.values()) if (isAlive(s) && s.stage === "logged_in") active++;
   return { ok: true, mode: "live", name: "KDK GST Engine (Live Portal)", activeSessions: active, time: iso() };
 }
+function progress(sessionId) {
+  const s = SESSIONS.get(sessionId);
+  if (!s) return { ok: false, error: "Session nahi mila" };
+  return { ok: true, stage: s.stage, progress: s.progress || null, alive: isAlive(s) };
+}
 function clients() {
   const store = load();
   const list = Object.entries(store.creds || {}).map(([g, c]) => ({
@@ -968,4 +988,4 @@ function results() {
   return { ok: true, mode: "live", store: { clients: store.clients, gstr1Queue: store.gstr1Queue } };
 }
 
-module.exports = { initLogin, submitSync, downloadItem, queueGstr1, status, results, clients };
+module.exports = { initLogin, submitSync, downloadItem, queueGstr1, status, results, clients, progress };
