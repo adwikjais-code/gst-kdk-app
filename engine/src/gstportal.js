@@ -31,6 +31,7 @@ const U = {
   itcLedger: process.env.ITC_LEDGER_URL || "https://return.gst.gov.in/returns/auth/ledger/taxledger",
   notices: process.env.NOTICES_URL || "https://services.gst.gov.in/services2/auth/getlistofnotices",
   gstr1Guess: "https://return.gst.gov.in/returns/auth/gstr1",
+  ecoSupplies: process.env.ECO_SUPPLIES_URL || "https://services.gst.gov.in/services/auth/suppliesbyecodetails",
   gstr2bGuess: "https://return.gst.gov.in/returns/auth/gstr2b",
 };
 const DASH_URL = U.returnsDash;
@@ -466,6 +467,12 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
     } catch (e) {}
   };
 
+  const consoleErrs = [];
+  try {
+    page.on("console", (msg) => { if (msg.type() === "error") consoleErrs.push(msg.text().slice(0, 160)); });
+    page.on("pageerror", (err) => consoleErrs.push("PAGEERR: " + (err.message || "").slice(0, 160)));
+  } catch { /* ignore */ }
+
   const grabRows = (minCols = 3) => page.evaluate((mc) => {
     const out = [];
     document.querySelectorAll("table tr").forEach((tr) => {
@@ -723,7 +730,54 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
       }
       logStep("gstr2b-records", base.tdsTcsRecords.length);
     }
+    if (consoleErrs.length) logStep("gstr2b-console-errs", consoleErrs.slice(0, 6).join(" | "));
   } catch (e) { logStep("gstr2b-err", e.message); }
+
+  // ===== STEP 5b: TDS/TCS — supplies by e-commerce operators (ECOs, e.g. Etsy) =====
+  try {
+    if (await visit(page, U.ecoSupplies, "Supplies reported by e-commerce operators", "eco-supplies", logStep)) {
+      await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
+      await page.waitForTimeout(3000);
+      await dumpTables(page, "eco-supplies");
+      const etxt = await bodyText();
+      // try period selection for fp if a select exists
+      let searched = false;
+      const mmE = parseInt((fp || "").slice(0, 2), 10), yyE = parseInt((fp || "").slice(2, 6), 10);
+      const targetE = (mmE >= 1 && mmE <= 12 && yyE >= 2017) ? (mmE >= 4 ? yyE : yyE - 1) + "-" + String(mmE >= 4 ? yyE : yyE - 1 + 1).slice(2) : null;
+      if (targetE) {
+        const sels = page.locator("select");
+        const nE = await sels.count();
+        for (let i = 0; i < nE && !searched; i++) {
+          const sel = sels.nth(i);
+          if (await sel.isVisible().catch(() => false)) {
+            const opts = await sel.locator("option").allInnerTexts().catch(() => []);
+            const match = opts.find((o) => o.trim() === targetE || o.trim().replace(/^0/, "") === targetE.replace(/^0/, ""));
+            if (match) {
+              await sel.selectOption({ label: match }).catch(() => {});
+              const sb = page.locator("button:has-text('Search'), button:has-text('VIEW'), button:has-text('View'), button:has-text('Submit')").first();
+              if (await sb.isVisible({ timeout: 2500 })) { await sb.click({ timeout: 4000 }).catch(() => {}); await page.waitForTimeout(6000); searched = true; }
+            }
+          }
+        }
+      }
+      logStep("eco-supplies", "searched=" + searched + " | txt=" + etxt.slice(0, 300));
+      const rows = await grabRows(3);
+      logStep("eco-supplies-rows", "rows=" + rows.length);
+      for (const r of rows.slice(0, 60)) {
+        const joined = r.join(" ");
+        if (!GSTIN_RE.test(joined)) continue;
+        const g = (joined.match(GSTIN_RE) || [])[0];
+        const name = r.find((c) => c.length > 3 && !GSTIN_RE.test(c) && !/^[0-9,./\- ]+$/.test(c)) || "ECO";
+        const amounts = r.map(num).filter((v) => v !== 0);
+        if (!amounts.length) continue;
+        base.tdsTcsRecords.push({
+          type: "TCS (ECO)", ctin: g, cname: name,
+          net: amounts[0] || 0, iamt: 0, camt: 0, samt: 0, totalCredit: amounts[amounts.length - 1] || 0,
+          status: "Pending Action",
+        });
+      }
+    }
+  } catch (e) { logStep("eco-supplies-err", e.message); }
 
   // ===== STEP 6: GSTR-1 auto-upload (queued JSON) =====
   if (autoUploadGstr1) {
