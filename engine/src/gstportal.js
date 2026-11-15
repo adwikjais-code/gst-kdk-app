@@ -694,10 +694,21 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
       } catch (e) { logStep("gstr2b-period-err", e.message); }
       logStep("gstr2b-viewed", String(viewed));
       if (viewed) { await snap(page, "gstr2b-statement").catch(() => {}); await dumpTables(page, "gstr2b-statement"); }
-      await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
-      await page.waitForTimeout(3000);
-      const rows = await grabRows(4);
-      for (const r of rows.slice(0, 40)) {
+      await page.waitForTimeout(2000);
+      let rows = await grabRows(3);
+      if (!rows.length) {
+        // Angular div-grid fallback
+        rows = await page.evaluate(() => {
+          const out = [];
+          document.querySelectorAll('[role="row"], .mat-mdc-row, tr').forEach((tr) => {
+            const cells = [...tr.querySelectorAll('[role="cell"], [role="gridcell"], td')].map((c) => (c.innerText || "").trim());
+            if (cells.length >= 3) out.push(cells);
+          });
+          return out;
+        }).catch(() => []);
+        logStep("gstr2b-divgrid", "rows=" + rows.length);
+      }
+      for (const r of rows.slice(0, 60)) {
         const joined = r.join(" ");
         if (!GSTIN_RE.test(joined)) continue;
         const g = (joined.match(GSTIN_RE) || [])[0];
