@@ -18872,8 +18872,8 @@ function buildEtsyPdfReport(opts) {
         if (localDemoMode) {
           const demoCode = String(Math.floor(100000 + Math.random() * 900000));
           kdkCurrentSession = { localDemo: true, expectedCaptcha: demoCode, clientObj, cleanName, gstin, fp };
-          statusBox.className = "rounded-xl bg-emerald-50 border border-emerald-200 px-3.5 py-2.5 text-xs font-semibold text-emerald-900";
-          statusBox.innerHTML = "✅ <b>Username &amp; Password Background me Auto-Fill ho gaye!</b><br/>Neeche 6-digit Captcha enter karein:";
+          statusBox.className = "rounded-xl bg-amber-50 border border-amber-300 px-3.5 py-2.5 text-xs font-semibold text-amber-900";
+          statusBox.innerHTML = "🧪 <b>DEMO MODE</b> — sirf UI test hai (fake data, real OTP nahi chalega). Real portal sync ke liye modal band karke <b>⚡ Auto-Login &amp; Sync</b> dabayein.<br/>Neeche 6-digit Demo Captcha enter karein:";
           document.getElementById("kdkCaptchaImg").src = makeBuiltInSvgCaptcha(demoCode);
           const hint = document.getElementById("kdkDemoHintText");
           hint.textContent = "🧪 Demo Test Captcha Code: " + demoCode;
@@ -18938,8 +18938,13 @@ function buildEtsyPdfReport(opts) {
           }
 
           kdkCurrentSession = { localDemo: false, sessionId: data.sessionId, base, clientObj, cleanName, gstin, fp };
-          statusBox.className = "rounded-xl bg-emerald-50 border border-emerald-200 px-3.5 py-2.5 text-xs font-semibold text-emerald-900";
-          statusBox.innerHTML = "✅ <b>Username &amp; Password Background me Auto-Fill ho gaye!</b><br/>Bas ye Captcha dalein:";
+          if (localDemoMode) {
+            statusBox.className = "rounded-xl bg-amber-50 border border-amber-300 px-3.5 py-2.5 text-xs font-semibold text-amber-900";
+            statusBox.innerHTML = "🧪 <b>DEMO MODE</b> — sirf UI test (fake data, koi real OTP nahi). Real sync ke liye <b>⚡ Auto-Login &amp; Sync</b> use karein.<br/>Bas ye Demo Captcha dalein:";
+          } else {
+            statusBox.className = "rounded-xl bg-emerald-50 border border-emerald-200 px-3.5 py-2.5 text-xs font-semibold text-emerald-900";
+            statusBox.innerHTML = "✅ <b>Username &amp; Password Background me Auto-Fill ho gaye!</b><br/>Bas ye Captcha dalein:";
+          }
           document.getElementById("kdkCaptchaImg").src = data.captchaImage;
           document.getElementById("kdkDemoHintText").classList.add("hidden");
           captchaArea.classList.remove("hidden");
@@ -18979,7 +18984,7 @@ function buildEtsyPdfReport(opts) {
           }
 
           statusBox.className = "rounded-xl bg-indigo-50 border border-indigo-200 px-3.5 py-2.5 text-xs font-semibold text-indigo-900";
-          statusBox.innerHTML = "🚀 Background me TDS/TCS, Notices &amp; Ledgers fetch ho rahe hain...";
+          statusBox.innerHTML = "🧪 <b>DEMO:</b> fake data generate ho raha hai...";
           await new Promise((r) => setTimeout(r, 700));
 
           const qKey = kdkCurrentSession.gstin + "_" + kdkCurrentSession.fp;
@@ -19012,7 +19017,7 @@ function buildEtsyPdfReport(opts) {
           if (typeof renderApp === "function") renderApp();
 
           document.getElementById("kdkCaptchaModalOverlay").classList.add("hidden");
-          showKdkBanner(`✅ <b>${kdkCurrentSession.cleanName}</b>: 2 TDS/TCS records (₹1,230) + 1 Notice synced in background!`, "ok");
+          showKdkBanner(`🧪 <b>DEMO (fake data):</b> ${kdkCurrentSession.cleanName} — 2 TDS/TCS (₹1,230) + 1 Notice dikhaye gaye. Real data ke liye ⚡ Auto-Login &amp; Sync karein (OTP ke saath).`, "warn");
           if (typeof switchAppPage === "function") switchAppPage("kdk");
           return;
         }

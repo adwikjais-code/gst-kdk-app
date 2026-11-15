@@ -45,7 +45,8 @@ const SEL = {
   loginBtn: ["button:has-text('LOGIN')", "input[type='submit']", "button[type='submit']"],
   captchaImg: ["img[id*='captcha' i]", "img[name*='captcha' i]", "img[class*='captcha' i]", "img[src*='captcha' i]"],
   captchaInput: ["input[name='captcha']", "input[id*='captcha' i]", "input[placeholder*='Captcha' i]"],
-  otpInput: ["input[name*='otp' i]", "input[id*='otp' i]", "input[placeholder*='OTP' i]", "input[inputmode='numeric']"],
+  otpInput: ["input[name*='otp' i]", "input[id*='otp' i]", "input[placeholder*='OTP' i]"],
+  otpInputGeneric: ["input[inputmode='numeric']"],
   otpBtn: ["button:has-text('Verify')", "button:has-text('Submit')", "input[type='submit']", "button[type='submit']"],
   dashboard: ["#dashboard", "a[href*='dash']", "[class*='dashboard' i]", "text=Dashboard"],
   errorText: ["[class*='alert-danger']", "[class*='error']", "text=/invalid|incorrect|wrong|not valid|try again/i"],
@@ -180,19 +181,22 @@ async function initLogin({ gstin, username, password, clientName, fp }) {
 }
 
 // detect what portal is showing after a login action
+// Order matters: specific signals first (OTP input, captcha), generic last (dashboard nav exists on every page)
 async function detectStage(page) {
-  // dashboard first
-  for (const s of SEL.dashboard) {
-    try { if (await page.locator(s).first().isVisible({ timeout: 1500 })) return "dashboard"; } catch { /* next */ }
-  }
   for (const s of SEL.otpInput) {
-    try { if (await page.locator(s).first().isVisible({ timeout: 1500 })) return "otp"; } catch { /* next */ }
+    try { if (await page.locator(s).first().isVisible({ timeout: 1200 })) return "otp"; } catch { /* next */ }
   }
   for (const s of SEL.captchaInput) {
-    try { if (await page.locator(s).first().isVisible({ timeout: 1500 })) return "captcha"; } catch { /* next */ }
+    try { if (await page.locator(s).first().isVisible({ timeout: 1200 })) return "captcha"; } catch { /* next */ }
   }
   for (const s of SEL.captchaImg) {
-    try { if (await page.locator(s).first().isVisible({ timeout: 1000 })) return "captcha"; } catch { /* next */ }
+    try { if (await page.locator(s).first().isVisible({ timeout: 1200 })) return "captcha"; } catch { /* next */ }
+  }
+  for (const s of SEL.otpInputGeneric) {
+    try { if (await page.locator(s).first().isVisible({ timeout: 800 })) return "otp"; } catch { /* next */ }
+  }
+  for (const s of SEL.dashboard) {
+    try { if (await page.locator(s).first().isVisible({ timeout: 1200 })) return "dashboard"; } catch { /* next */ }
   }
   return "unknown";
 }
@@ -275,7 +279,9 @@ async function submitSync({ sessionId, captcha, fp, autoUploadGstr1, keepAliveFo
     }
 
     if (s.stage === "otp") {
-      const inp = await firstVisible(page, SEL.otpInput, 8000);
+      let inp;
+      try { inp = await firstVisible(page, SEL.otpInput, 6000); }
+      catch { inp = await firstVisible(page, SEL.otpInputGeneric, 6000); }
       await inp.fill(code);
       await (await firstVisible(page, SEL.otpBtn, 8000)).click();
       s.progress = { label: "OTP verify ho raha hai (portal)", pct: 5, stage: "otp", at: iso() };
