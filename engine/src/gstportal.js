@@ -103,7 +103,22 @@ async function initLogin({ gstin, username, password, clientName, fp }) {
   try { pw = require("playwright"); }
   catch { return { ok: false, error: "Playwright not installed. Run: npm install playwright && npx playwright install chromium --with-deps" }; }
 
-  if (!gstin || !username || !password) return { ok: false, error: "Portal ID / Password missing — client me set nahi hai." };
+  // ---- credential vault: engine remembers portal ID+password per GSTIN (works across devices) ----
+  let storeV = load();
+  const gKey = String(gstin || "").trim().toUpperCase();
+  const vault = gKey ? (storeV.creds || {})[gKey] : null;
+  if (vault) {
+    if (!username) username = vault.username;
+    if (!password) password = vault.password;
+    if (!clientName) clientName = vault.clientName;
+  }
+  if (gKey && username && password) {
+    storeV.creds = storeV.creds || {};
+    storeV.creds[gKey] = { username, password, clientName: clientName || "", updatedAt: iso() };
+    save();
+  }
+
+  if (!gstin || !username || !password) return { ok: false, error: "Portal ID / Password missing — client me set nahi hai (engine vault me bhi nahi mila)." };
 
   const id = crypto.randomUUID();
   let context = null;
@@ -117,17 +132,17 @@ async function initLogin({ gstin, username, password, clientName, fp }) {
     });
     const page = context.pages()[0] || (await context.newPage());
     await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: STEP_TIMEOUT * 2 });
-    await page.waitForTimeout(2500);
+    await page.waitForTimeout(1200);
 
     const idEl = await firstVisible(page, SEL.loginId);
     const pwEl = await firstVisible(page, SEL.loginPassword);
     await idEl.fill(username);
     await pwEl.fill(password);
-    await page.waitForTimeout(600);
+    await page.waitForTimeout(250);
     await (await firstVisible(page, SEL.loginBtn, 8000)).click();
 
     // wait for portal reaction: captcha screen / otp screen / error / dashboard
-    await page.waitForTimeout(5000);
+    await page.waitForTimeout(3500);
     const state = await detectStage(page);
 
     if (state === "captcha") {
@@ -941,9 +956,16 @@ function status() {
   for (const s of SESSIONS.values()) if (isAlive(s) && s.stage === "logged_in") active++;
   return { ok: true, mode: "live", name: "KDK GST Engine (Live Portal)", activeSessions: active, time: iso() };
 }
+function clients() {
+  const store = load();
+  const list = Object.entries(store.creds || {}).map(([g, c]) => ({
+    gstin: g, clientName: c.clientName || "", username: c.username || "", hasPassword: !!c.password, updatedAt: c.updatedAt || "",
+  }));
+  return { ok: true, mode: "live", clients: list };
+}
 function results() {
   const store = load();
   return { ok: true, mode: "live", store: { clients: store.clients, gstr1Queue: store.gstr1Queue } };
 }
 
-module.exports = { initLogin, submitSync, downloadItem, queueGstr1, status, results };
+module.exports = { initLogin, submitSync, downloadItem, queueGstr1, status, results, clients };

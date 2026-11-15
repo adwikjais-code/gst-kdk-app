@@ -271,4 +271,5 @@ function results() {
   return { ok: true, mode: "demo", store: { clients: store.clients, gstr1Queue: store.gstr1Queue } };
 }
 
-module.exports = { initLogin, submitSync, downloadItem, queueGstr1, status, results, SESSIONS };
+function clients() { return { ok: true, mode: "demo", clients: [] }; }
+module.exports = { initLogin, submitSync, downloadItem, queueGstr1, status, results, clients, SESSIONS };

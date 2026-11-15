@@ -18535,7 +18535,7 @@ function buildEtsyPdfReport(opts) {
         // engine + app served from one origin → zero-config. If no engine is present
         // here, this stays "" and the KDK modal shows the "set engine URL" box as before.
         if (kdkSameOriginEngine) return location.origin;
-        return "";
+        return "https://gst-kdk-app.onrender.com"; // default production engine (zero-setup)
       }
       (async function probeSameOriginEngine() {
         try {
@@ -18620,6 +18620,38 @@ function buildEtsyPdfReport(opts) {
         return false;
       }
 
+      let kdkEngineRestored = false;
+      async function restoreClientsFromEngine() {
+        if (kdkEngineRestored) return;
+        kdkEngineRestored = true;
+        try {
+          const base = getEngineBaseUrl();
+          if (!base) return;
+          const r = await fetch(base + "/api/kdk/clients", { cache: "no-store" });
+          const j = await r.json();
+          if (!j.ok || !Array.isArray(j.clients) || !j.clients.length) return;
+          let changed = 0;
+          for (const ec of j.clients) {
+            if (!ec.gstin || !ec.username) continue;
+            const g = String(ec.gstin).trim().toUpperCase();
+            let mc = clients.find((c) => String(c.gstin || "").trim().toUpperCase() === g);
+            if (!mc) {
+              clients.push({ sr: clients.length + 1, client: (ec.clientName || ec.username).replace(/\*/g, ""), gstin: ec.gstin, id: ec.username, password: "", engineRestored: true });
+              changed++;
+            } else if (!mc.id && ec.username) {
+              mc.id = ec.username;
+              changed++;
+            }
+          }
+          if (changed) {
+            saveClients();
+            populateDropdown();
+            if (typeof renderKdkHubData === "function") renderKdkHubData();
+            showKdkBanner("🔄 " + changed + " client(s) engine se sync ho gaye (credentials saved hain).", "ok");
+          }
+        } catch (e) { kdkEngineRestored = false; }
+      }
+
       function populateDropdown() {
         const sel = document.getElementById("kdkSingleClientSelect");
         if (!sel || typeof clients === "undefined") return;
@@ -18635,6 +18667,7 @@ function buildEtsyPdfReport(opts) {
         populateDropdown();
         renderKdkHubData();
         checkEngineStatus();
+        restoreClientsFromEngine();
       };
 
       function makeBuiltInSvgCaptcha(code) {
@@ -18866,12 +18899,13 @@ function buildEtsyPdfReport(opts) {
           else plainPassword = clientObj.password || "";
         } catch (e) {}
 
-        if (!plainPassword) {
+        if (!plainPassword && !username) {
           statusBox.className = "rounded-xl bg-rose-50 border border-rose-300 px-3.5 py-3 text-xs font-semibold text-rose-900";
-          statusBox.innerHTML = `❌ <b>Password Locked / Missing:</b> <b>${cleanName}</b> ka GST Password nahi mila!<br/>(Agar Fingerprint se khola tha to App Password se unlock karein, ya ✏️ Edit me Password save karein.)`;
-          showKdkBanner(`❌ ${cleanName}: GST Password उपलब्ध नहीं है।`, "error");
+          statusBox.innerHTML = `❌ <b>Credentials Missing:</b> <b>${cleanName}</b> ka Portal ID aur Password dono nahi mile!`;
+          showKdkBanner(`❌ ${cleanName}: Portal ID + Password missing.`, "error");
           return;
         }
+        // empty password OK — engine ka saved credential vault use hoga (pehle sync hua tha)
 
         const base = getEngineBaseUrl();
         if (!base) {
@@ -18884,6 +18918,8 @@ function buildEtsyPdfReport(opts) {
         }
 
         statusBox.className = "rounded-xl bg-indigo-50 border border-indigo-200 px-3.5 py-3 text-xs font-semibold text-indigo-900";
+        statusBox.innerHTML = "⏳ <b>Engine se connect</b> ho raha hai (cold-start par 50s lag sakte hain, ek baar ka hai)...";
+        try { await fetch(base + "/api/kdk/status", { cache: "no-store" }).then((x) => x.json()); } catch (e) { /* warmup best-effort */ }
         statusBox.innerHTML = "⏳ <b>Background Engine</b> GST Portal khol raha hai aur ID + Password bhar raha hai (screen par portal nahi khulega)...";
 
         try {
