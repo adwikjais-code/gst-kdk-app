@@ -37,6 +37,28 @@ app.get("/api/kdk/status", (req, res) => {
   catch (e) { res.json({ ok: false, error: e.message }); }
 });
 
+// --- debug helper: list screenshots + last scrape trace (for fixing selectors) ---
+app.get("/api/kdk/debug", (req, res) => {
+  try {
+    const fs = require("fs");
+    const dbgDir = path.join(DATA_DIR, "debug");
+    const files = fs.existsSync(dbgDir)
+      ? fs.readdirSync(dbgDir).filter((f) => f.endsWith(".png")).map((f) => {
+          const st = fs.statSync(path.join(dbgDir, f));
+          return { file: f, url: "/debug/" + f, size: st.size, mtime: st.mtime.toISOString() };
+        }).sort((a, b) => b.mtime.localeCompare(a.mtime))
+      : [];
+    let trace = null;
+    const tf = path.join(dbgDir, "last-scrape-trace.json");
+    if (fs.existsSync(tf)) {
+      try { trace = JSON.parse(fs.readFileSync(tf, "utf8")); } catch (e) {}
+    }
+    res.json({ ok: true, files, trace });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // --- results (frontend merges this into local store) ---
 app.get("/api/kdk/results", (req, res) => {
   try { res.json(engine.results()); }

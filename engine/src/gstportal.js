@@ -295,6 +295,20 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
     tdsTcsRecords: [], notices: [], gstr1Upload: null, source: "kdk-engine-live",
   };
 
+  // ---- debug trace (written to data/debug/last-scrape-trace.json) ----
+  const trace = [];
+  const logStep = (step, detail) => {
+    let url = "";
+    try { url = page.url(); } catch (e) {}
+    trace.push({ step, url, detail: detail ? String(detail).slice(0, 300) : "", at: new Date().toISOString() });
+  };
+  const flushTrace = () => {
+    try {
+      ensureDebug();
+      fs.writeFileSync(path.join(DEBUG_DIR, "last-scrape-trace.json"), JSON.stringify({ gstin: s.gstin, fp: fp || "", trace }, null, 2));
+    } catch (e) {}
+  };
+
   // helper: grab all visible table rows (>= n cols)
   const grabRows = (minCols = 3) => page.evaluate((mc) => {
     const out = [];
@@ -331,6 +345,17 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
     await snap(page, "dash-landed");
   } catch (e) { await snap(page, "dash-err").catch(() => {}); }
 
+  try {
+    const menuInfo = await page.evaluate(() => {
+      const links = [...document.querySelectorAll("a, li, button, span")].map(el => (el.innerText || "").trim())
+        .filter(t => t && t.length > 1 && t.length < 40);
+      const uniq = [...new Set(links)];
+      return { count: uniq.length, sample: uniq.slice(0, 80) };
+    });
+    logStep("dash-menu-scan", JSON.stringify({ url: page.url(), linkCount: menuInfo.count }));
+    fs.writeFileSync(path.join(DEBUG_DIR, "last-menu-texts.json"), JSON.stringify(menuInfo, null, 1));
+  } catch (e) { logStep("dash-menu-scan-err", e.message); }
+
   // 1) Ledger balances from dashboard text
   try {
     const bodyText = await page.evaluate(() => document.body.innerText || "");
@@ -339,7 +364,8 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
     base.cashLedgerBalance = cashM ? num(cashM[1]) : 0;
     base.creditLedgerBalance = creditM ? num(creditM[1]) : 0;
     base.dashboardTextSnippet = bodyText.slice(0, 800);
-  } catch { /* ignore */ }
+    logStep("ledger-scan", JSON.stringify({ cash: base.cashLedgerBalance, credit: base.creditLedgerBalance, bodyLen: bodyText.length, bodyStart: bodyText.slice(0, 300) }));
+  } catch (e) { logStep("ledger-err", e.message); }
 
   // 2) Notices — try menu then tables on dashboard
   try {
@@ -355,7 +381,8 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
         });
       }
     }
-  } catch (e) { await snap(page, "notices-err").catch(() => {}); }
+  } catch (e) { logStep("notices-err", e.message); await snap(page, "notices-err").catch(() => {}); }
+  logStep("notices-done", "notices=" + base.notices.length);
 
   // 3) TDS/TCS (GSTR-2B / RCM) — menu then tables
   try {
@@ -370,7 +397,8 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
         });
       }
     }
-  } catch (e) { await snap(page, "gstr2b-err").catch(() => {}); }
+  } catch (e) { logStep("gstr2b-err", e.message); await snap(page, "gstr2b-err").catch(() => {}); }
+  logStep("gstr2b-done", "records=" + base.tdsTcsRecords.length);
 
   // 4) GSTR-1 auto-upload (queued JSON)
   if (autoUploadGstr1) {
@@ -408,6 +436,7 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
   }
 
   await snap(page, "scrape-done").catch(() => {});
+  flushTrace();
   return base;
 }
 
