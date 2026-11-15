@@ -737,31 +737,41 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
   try {
     if (await visit(page, U.ecoSupplies, "Supplies reported by e-commerce operators", "eco-supplies", logStep)) {
       await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
-      await page.waitForTimeout(3000);
-      await dumpTables(page, "eco-supplies");
-      const etxt = await bodyText();
-      // try period selection for fp if a select exists
-      let searched = false;
+      // AngularJS loads select options async — poll until populated (max ~20s)
+      let selInfo = { n: 0, opts: [] };
+      for (let i = 0; i < 10; i++) {
+        selInfo = await page.evaluate(() => {
+          const sels = [...document.querySelectorAll("select")];
+          return { n: sels.length, opts: sels.slice(0, 3).map((s) => [...s.options].map((o) => o.text.trim()).filter(Boolean).slice(0, 16)) };
+        }).catch(() => ({ n: 0, opts: [] }));
+        if (selInfo.n >= 2 && selInfo.opts[0] && selInfo.opts[0].length > 0) break;
+        await page.waitForTimeout(2000);
+      }
+      logStep("eco-supplies-sels", JSON.stringify(selInfo).slice(0, 300));
       const mmE = parseInt((fp || "").slice(0, 2), 10), yyE = parseInt((fp || "").slice(2, 6), 10);
-      const targetE = (mmE >= 1 && mmE <= 12 && yyE >= 2017) ? (mmE >= 4 ? yyE : yyE - 1) + "-" + String(mmE >= 4 ? yyE : yyE - 1 + 1).slice(2) : null;
-      if (targetE) {
+      if (mmE >= 1 && mmE <= 12 && yyE >= 2017 && selInfo.n >= 2) {
+        const fyStart = mmE >= 4 ? yyE : yyE - 1;
+        const fyLabel = fyStart + "-" + String(fyStart + 1).slice(2);
+        const monthsE = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
         const sels = page.locator("select");
-        const nE = await sels.count();
-        for (let i = 0; i < nE && !searched; i++) {
-          const sel = sels.nth(i);
-          if (await sel.isVisible().catch(() => false)) {
-            const opts = await sel.locator("option").allInnerTexts().catch(() => []);
-            const match = opts.find((o) => o.trim() === targetE || o.trim().replace(/^0/, "") === targetE.replace(/^0/, ""));
-            if (match) {
-              await sel.selectOption({ label: match }).catch(() => {});
-              const sb = page.locator("button:has-text('Search'), button:has-text('VIEW'), button:has-text('View'), button:has-text('Submit')").first();
-              if (await sb.isVisible({ timeout: 2500 })) { await sb.click({ timeout: 4000 }).catch(() => {}); await page.waitForTimeout(6000); searched = true; }
-            }
-          }
+        await sels.nth(0).selectOption({ label: fyLabel }).catch(async () => { await sels.nth(0).selectOption({ index: 1 }).catch(() => {}); });
+        await page.waitForTimeout(800);
+        await sels.nth(1).selectOption({ label: monthsE[mmE - 1] }).catch(async () => {
+          await sels.nth(1).selectOption({ index: mmE }).catch(async () => { await sels.nth(1).selectOption({ index: 1 }).catch(() => {}); });
+        });
+        await page.waitForTimeout(800);
+        const sb = page.locator("button:has-text('SEARCH'), input[type='submit']").first();
+        if (await sb.isVisible({ timeout: 3000 })) {
+          await sb.click({ timeout: 5000 }).catch(() => {});
+          await page.waitForTimeout(8000);
+          await snap(page, "eco-supplies-after").catch(() => {});
+          await dumpTables(page, "eco-supplies-after");
+          logStep("eco-supplies-searched", "fy=" + fyLabel + " m=" + monthsE[mmE - 1]);
         }
       }
-      logStep("eco-supplies", "searched=" + searched + " | txt=" + etxt.slice(0, 300));
-      const rows = await grabRows(3);
+      const etxt = await bodyText();
+      logStep("eco-supplies-text", etxt.slice(0, 400));
+      let rows = await grabRows(3);
       logStep("eco-supplies-rows", "rows=" + rows.length);
       for (const r of rows.slice(0, 60)) {
         const joined = r.join(" ");
