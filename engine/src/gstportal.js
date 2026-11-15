@@ -26,6 +26,7 @@ const U = {
   home: "https://www.gst.gov.in/",
   authDash: "https://services.gst.gov.in/services/auth/dashboard",
   returnsDash: process.env.RETURNS_DASH_URL || "https://return.gst.gov.in/returns/auth/dashboard",
+  ledgersQuick: process.env.LEDGERS_QUICK_URL || "https://services.gst.gov.in/services/auth/quicklinks/ledgers",
   cashLedger: process.env.CASH_LEDGER_URL || "https://payment.gst.gov.in/payment/auth/ledger/cashledger",
   itcLedger: process.env.ITC_LEDGER_URL || "https://return.gst.gov.in/returns/auth/ledger/taxledger",
   notices: process.env.NOTICES_URL || "https://services.gst.gov.in/services2/auth/getlistofnotices",
@@ -311,19 +312,81 @@ async function dismissPopup(page) {
     }
   } catch { /* ignore */ }
 }
-async function gotoSettle(page, url, tag, logStep) {
+const REJECTED_RE = /accessdenied|notfound|\/error\/|was rejected|Page not found/i;
+function isRejected(page) {
+  let u = ""; try { u = page.url(); } catch { /* ignore */ }
+  return REJECTED_RE.test(u) || false;
+}
+async function settle(page, tag, logStep, waitMs = 8000) {
+  await page.waitForTimeout(waitMs);
+  await dismissPopup(page);
+  await snap(page, tag).catch(() => {});
+  await dumpTables(page, tag).catch(() => {});
+  await dumpAnchors(page, tag).catch(() => {});
+  let final = "";
+  try { final = page.url(); } catch { /* ignore */ }
+  logStep(tag, "url=" + final);
+  return !isRejected(page);
+}
+// direct goto with real-site referer; falls back to in-page menu click (like a real user)
+async function visit(page, url, linkText, tag, logStep) {
   try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: STEP_TIMEOUT });
-    await page.waitForTimeout(4500);
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: STEP_TIMEOUT, referer: "https://www.gst.gov.in/" });
+    if (await settle(page, tag, logStep)) return true;
+    logStep(tag + "-rejected", "direct goto rejected — trying menu click");
+  } catch (e) { logStep(tag + "-goto-err", e.message); }
+  // fallback: go home, then click the nav link with matching text
+  try {
+    await page.goto(U.home, { waitUntil: "domcontentloaded", timeout: STEP_TIMEOUT });
+    await page.waitForTimeout(5000);
     await dismissPopup(page);
-    await snap(page, tag).catch(() => {});
-    let final = "";
-    try { final = page.url(); } catch { /* ignore */ }
-    logStep(tag, "url=" + final);
-    return !/\/login|notfound|error/i.test(final);
+    const clicked = await page.evaluate((lbl) => {
+      const esc = lbl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const exact = new RegExp("^" + esc + "$", "i");
+      const contains = new RegExp(esc, "i");
+      let cands = [...document.querySelectorAll("a")].filter((a) => {
+        const t = (a.innerText || "").replace(/\s+/g, " ").trim();
+        return exact.test(t) && a.href;
+      });
+      if (!cands.length) cands = [...document.querySelectorAll("a")].filter((a) => {
+        const t = (a.innerText || "").replace(/\s+/g, " ").trim();
+        return contains.test(t) && a.href && !/download|offline|tutorial/i.test(a.href);
+      });
+      if (!cands.length) return false;
+      cands[0].click();
+      return true;
+    }, linkText);
+    if (!clicked) { logStep(tag + "-nolink", "menu link not found: " + linkText); return false; }
+    return await settle(page, tag + "-via-click", logStep);
+  } catch (e) {
+    logStep(tag + "-click-err", e.message);
+    return false;
+  }
+}
+// open Services dropdown then click an item by exact-ish text
+async function clickServicesItem(page, itemText, tag, logStep) {
+  try {
+    await page.evaluate(() => {
+      for (const t of document.querySelectorAll(".dropdown-toggle, a[role='button']")) {
+        if ((t.innerText || "").trim().startsWith("Services")) { t.click(); return; }
+      }
+    });
+    await page.waitForTimeout(2000);
+    const clicked = await page.evaluate((lbl) => {
+      const re = new RegExp("^" + lbl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$", "i");
+      const cands = [...document.querySelectorAll("a, span, li, button")].filter((el) => {
+        const t = (el.innerText || "").replace(/\s+/g, " ").trim();
+        return re.test(t);
+      });
+      if (!cands.length) return false;
+      const a = cands[0].closest("a") || cands[0];
+      a.click();
+      return true;
+    }, itemText);
+    if (!clicked) { logStep(tag + "-nolink", "services item not found: " + itemText); return false; }
+    return await settle(page, tag, logStep);
   } catch (e) {
     logStep(tag + "-err", e.message);
-    await snap(page, tag + "-err").catch(() => {});
     return false;
   }
 }
@@ -409,12 +472,71 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
   const bodyText = () => page.evaluate(() => document.body.innerText || "");
   const GSTIN_RE = /[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]/;
 
-  // ===== STEP 1: Returns Dashboard (GSTR-1/3B status + nav link capture) =====
-  let onRetDash = await gotoSettle(page, U.returnsDash, "returns-dash", logStep);
+  // ===== STEP 0: Home + cookie/session proof =====
+  await visit(page, U.home, "Home", "home", logStep);
+  try {
+    const cookies = await page.context().cookies();
+    logStep("cookies", cookies.map((c) => c.domain + ":" + c.name).join(", "));
+  } catch (e) {}
+
+  try {
+    s.gstr1Url = s.gstr1Url || (await findLinkBy(page, "^GSTR-1$"))?.href || null;
+    s.gstr2bUrl = s.gstr2bUrl || (await findLinkBy(page, "^GSTR-2B$"))?.href || null;
+  } catch (e) {}
+
+  // ===== STEP 1: Auth Dashboard (services subdomain — session is valid here) =====
+  let onAuthDash = await visit(page, U.authDash, "Dashboard", "auth-dash", logStep);
+  if (onAuthDash) {
+    try {
+      const rows = await grabRows(3);
+      for (const r of rows.slice(0, 30)) {
+        const joined = r.join(" ");
+        if (/GSTR-?\d/i.test(joined)) {
+          base.returnStatuses.push({ type: (joined.match(/GSTR-?\d+[A-Z]?/i) || [])[0] || "-", status: /filed|submitted/i.test(joined) ? "Filed" : (/not filed|pending/i.test(joined) ? "Not Filed" : "Unknown"), detail: joined.slice(0, 140) });
+        }
+      }
+      const txt = await bodyText();
+      base.dashboardTextSnippet = txt.slice(0, 900);
+      const cashM = txt.match(/Cash\s+Ledger[^\d\-]{0,60}([\d,]+\.\d{2})/i);
+      const itcM = txt.match(/ITC[^\d\-]{0,40}([\d,]+\.\d{2})/i);
+      if (cashM) base.cashLedgerBalance = num(cashM[1]);
+      if (itcM) base.creditLedgerBalance = num(itcM[1]);
+      logStep("auth-dash-text", txt.slice(0, 400));
+    } catch (e) { logStep("auth-dash-err", e.message); }
+  }
+
+  // ===== STEP 3: Cash Ledger (services quicklink, then payment subdomain) =====
+  try {
+    if (await visit(page, U.ledgersQuick, "Ledgers", "ledgers-quick", logStep)) {
+      const rows = await grabRows(3);
+      const v = balanceFromRows(rows);
+      if (v !== null) base.cashLedgerBalance = base.cashLedgerBalance || v;
+      const txt = await bodyText();
+      const cm = txt.match(/Cash[^\d\-]{0,40}([\d,]+\.\d{2})/i);
+      if (cm && !base.cashLedgerBalance) base.cashLedgerBalance = num(cm[1]);
+      const im = txt.match(/ITC[^\d\-]{0,40}([\d,]+\.\d{2})/i);
+      if (im && !base.creditLedgerBalance) base.creditLedgerBalance = num(im[1]);
+      logStep("ledgers-quick-balances", "cash=" + base.cashLedgerBalance + " itc=" + base.creditLedgerBalance + " txt=" + txt.slice(0, 250));
+    }
+    if (!base.cashLedgerBalance && await visit(page, U.cashLedger, "Cash Ledger", "cash-ledger", logStep)) {
+      await dumpTables(page, "cash-ledger");
+      const rows = await grabRows(3);
+      const v = balanceFromRows(rows);
+      if (v !== null) base.cashLedgerBalance = v;
+      const txt = await bodyText();
+      if (!v) {
+        const m = txt.match(/Balance[^\n\d]{0,60}([\d,]+\.\d{2})/i);
+        if (m) base.cashLedgerBalance = num(m[1]);
+      }
+      base.ledgerTextSnippet = txt.slice(0, 700);
+      logStep("cash-ledger-balance", base.cashLedgerBalance);
+    }
+  } catch (e) { logStep("cash-ledger-err", e.message); }
+
+  // ===== STEP 2: Returns Dashboard (return subdomain) =====
+  let onRetDash = await visit(page, U.returnsDash, "Returns Dashboard", "returns-dash", logStep);
   if (onRetDash) {
-    await dumpAnchors(page, "returns-dash");
-    await dumpTables(page, "returns-dash");
-    s.gstr1Url = (await findLinkBy(page, "^GSTR-1$"))?.href || U.gstr1Guess;
+    s.gstr1Url = (await findLinkBy(page, "^GSTR-1$"))?.href || s.gstr1Url || U.gstr1Guess;
     s.gstr2bUrl = (await findLinkBy(page, "^GSTR-2B$"))?.href || U.gstr2bGuess;
     logStep("link-capture", "gstr1=" + s.gstr1Url + " gstr2b=" + s.gstr2bUrl);
     try {
@@ -431,26 +553,10 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
     } catch (e) { logStep("returns-dash-err", e.message); }
   }
 
-  // ===== STEP 2: Cash Ledger =====
-  try {
-    if (await gotoSettle(page, U.cashLedger, "cash-ledger", logStep)) {
-      await dumpTables(page, "cash-ledger");
-      const rows = await grabRows(3);
-      const v = balanceFromRows(rows);
-      if (v !== null) base.cashLedgerBalance = v;
-      const txt = await bodyText();
-      if (!v) {
-        const m = txt.match(/Balance[^\n\d]{0,60}([\d,]+\.\d{2})/i);
-        if (m) base.cashLedgerBalance = num(m[1]);
-      }
-      base.ledgerTextSnippet = txt.slice(0, 700);
-      logStep("cash-ledger-balance", base.cashLedgerBalance);
-    }
-  } catch (e) { logStep("cash-ledger-err", e.message); }
 
-  // ===== STEP 3: ITC (Input Tax Credit) Ledger =====
+  // ===== STEP 3b: ITC (Input Tax Credit) Ledger =====
   try {
-    if (await gotoSettle(page, U.itcLedger, "itc-ledger", logStep)) {
+    if (!base.creditLedgerBalance && await visit(page, U.itcLedger, "Liability Ledger", "itc-ledger", logStep)) {
       await dumpTables(page, "itc-ledger");
       const rows = await grabRows(3);
       const v = balanceFromRows(rows);
@@ -466,8 +572,7 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
 
   // ===== STEP 4: Notices / Intimations =====
   try {
-    if (await gotoSettle(page, U.notices, "notices", logStep)) {
-      await dumpTables(page, "notices");
+    if (await visit(page, U.notices, "Notices / Intimation", "notices", logStep)) {
       const rows = await grabRows(3);
       logStep("notices-rows", "rawRows=" + rows.length);
       for (const r of rows.slice(0, 25)) {
@@ -483,9 +588,7 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
 
   // ===== STEP 5: GSTR-2B (TDS/TCS credit) =====
   try {
-    if (await gotoSettle(page, s.gstr2bUrl || U.gstr2bGuess, "gstr2b-page", logStep)) {
-      await dumpAnchors(page, "gstr2b-page");
-      await dumpTables(page, "gstr2b-page");
+    if (await visit(page, s.gstr2bUrl || U.gstr2bGuess, "GSTR-2B", "gstr2b-page", logStep)) {
       // period select?
       let viewed = false;
       try {
@@ -540,9 +643,8 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
       try {
         const tmp = path.join(DATA_DIR, `gstr1_${s.gstin}_${Date.now()}.json`);
         fs.writeFileSync(tmp, q.jsonContent);
-        await gotoSettle(page, s.gstr1Url || U.gstr1Guess, "gstr1-page", logStep);
-        await dumpAnchors(page, "gstr1-page");
-        await dumpTables(page, "gstr1-page");
+        if (await visit(page, s.gstr1Url || U.gstr1Guess, "GSTR-1", "gstr1-page", logStep)) {
+        await page.waitForTimeout(2000);
         const fileInput = page.locator("input[type='file']").first();
         if (await fileInput.isVisible({ timeout: 8000 })) {
           await fileInput.setInputFiles(tmp);
@@ -560,9 +662,13 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
             base.gstr1Upload = { status: "UPLOADED", refId: q.uploadRefId, fileName: q.fileName, fp: fp || "", uploadedAt: q.uploadedAt, mode: "Auto-Upload (KDK Engine)" };
             logStep("gstr1-uploaded", q.uploadRefId);
           }
-        } else {
+        } else if (page.url().indexOf("gstr1") !== -1) {
           base.gstr1Upload = { status: "PENDING", refId: "", fileName: q.fileName, error: "GSTR-1 page par file-upload input nahi mila (URL/step debug kar raha hoon)" };
           logStep("gstr1-no-file-input", "url=" + page.url());
+        } else {
+          base.gstr1Upload = { status: "PENDING", refId: "", fileName: q.fileName, error: "GSTR-1 page reject hua (WAF/login) — auto-upload next sync par dobara try hoga" };
+          logStep("gstr1-rejected", "url=" + page.url());
+        }
         }
       } catch (e) {
         base.gstr1Upload = { status: "FAILED", refId: "", fileName: q.fileName, error: e.message };
