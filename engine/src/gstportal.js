@@ -650,20 +650,86 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
       if (btn) { btn.click(); return "clicked"; }
       return "no-btn";
     });
+    // PRIMARY: download GSTR-2B JSON from the card's DOWNLOAD button (statement app is bot-blocked)
+    let g2bFile = null;
+    try {
+      const pagesBefore = page.context().pages().length;
+      const dlPromise = page.waitForEvent("download", { timeout: 30000 });
+      const clickedDl = await page.evaluate(() => {
+        const containers = [...document.querySelectorAll("div, section, td")].filter((el) => {
+          const t = el.innerText || "";
+          return /GSTR-2B/i.test(t) && /DOWNLOAD/i.test(t) && t.length < 800;
+        });
+        if (!containers.length) return false;
+        containers.sort((a, b) => (a.innerText || "").length - (b.innerText || "").length);
+        const card = containers[0];
+        const btn = [...card.querySelectorAll("button, a, input")].find((b) => ((b.innerText || b.value || "") + "").trim().toUpperCase() === "DOWNLOAD");
+        if (btn) { btn.click(); return true; }
+        return false;
+      });
+      if (clickedDl) {
+        const dl = await dlPromise;
+        const safe = (dl.suggestedFilename() || "gstr2b.json").replace(/[^A-Za-z0-9._-]/g, "_");
+        g2bFile = path.join(DATA_DIR, `gstr2b_${s.gstin}_${Date.now()}_${safe}`);
+        await dl.saveAs(g2bFile);
+        logStep("g2b-download", "saved " + safe);
+      } else {
+        logStep("g2b-download", "no-download-btn-found");
+      }
+      // if a popup/new tab opened instead of a download, close it
+      const pagesNow = page.context().pages();
+      if (pagesNow.length > pagesBefore) {
+        for (const p of pagesNow.slice(pagesBefore)) await p.close().catch(() => {});
+        logStep("g2b-download", "popup-closed");
+        await page.waitForTimeout(2000);
+      }
+    } catch (e) { logStep("g2b-download-err", e.message.slice(0, 200)); }
+
+    // parse TDS/TCS section out of the downloaded GSTR-2B JSON
+    if (g2bFile) {
+      try {
+        const raw = fs.readFileSync(g2bFile, "utf8");
+        let obj = null;
+        try { obj = JSON.parse(raw); } catch { /* maybe excel/other */ }
+        if (obj) {
+          const g2b = (obj.data && obj.data.gstr02b) ? obj.data.gstr02b : (obj.gstr02b || obj);
+          const tdsArr = g2b.tds_tcs || g2b.tdsTcs || g2b.tds || g2b.ec_tcs || [];
+          logStep("g2b-json-keys", Object.keys(g2b).join(",") + " | tdsArr=" + (Array.isArray(tdsArr) ? tdsArr.length : typeof tdsArr));
+          if (Array.isArray(tdsArr)) {
+            for (const rec of tdsArr.slice(0, 80)) {
+              const ctin = rec.ctin || rec.ecin || rec.gstin || "-";
+              if (!ctin) continue;
+              const cname = rec.name || rec.ecname || rec.tradl_name || "-";
+              const igst = Number(rec.igst || 0), cgst = Number(rec.cgst || 0), sgst = Number(rec.sgst || 0), cess = Number(rec.cess || 0);
+              const total = Number(rec.itc || 0) || (igst + cgst + sgst + cess);
+              const isTcs = /tcs/i.test(JSON.stringify(rec)) || /etds|eco/i.test(cname + " " + ctin);
+              base.tdsTcsRecords.push({
+                type: isTcs ? "TCS" : "TDS", ctin, cname,
+                net: Number(rec.val || rec.supply_val || 0), iamt: igst, camt: cgst, samt: sgst, cess: cess,
+                totalCredit: total, status: "Pending Action",
+              });
+            }
+            logStep("g2b-json-parsed", "records=" + base.tdsTcsRecords.length);
+          }
+        } else {
+          logStep("g2b-json-parsed", "not-json len=" + raw.length + " head=" + raw.slice(0, 100).replace(/\n/g, " "));
+        }
+      } catch (e) { logStep("g2b-parse-err", e.message); }
+    }
+
+    // SECONDARY: try statement VIEW (bot-blocked usually)
     logStep("gstr2b-view-click", clicked2b);
-    if (clicked2b === "clicked") {
+    if (clicked2b === "clicked" && base.tdsTcsRecords.length === 0) {
       await page.waitForTimeout(8000);
-      // adaptive wait: gstr2b subdomain is a heavy Angular app — poll until content renders
       let renderedLen = 0;
-      for (let i = 0; i < 9; i++) {
+      for (let i = 0; i < 6; i++) {
         renderedLen = await page.evaluate(() => (document.body.innerText || "").trim().length).catch(() => 0);
         if (renderedLen > 400) break;
         await page.waitForTimeout(3000);
       }
       await snap(page, "gstr2b-statement").catch(() => {});
       await dumpTables(page, "gstr2b-statement");
-      const g2bTxt = await page.evaluate(() => (document.body.innerText || "").trim().slice(0, 400)).catch(() => "");
-      logStep("gstr2b-render", "len=" + renderedLen + " | " + g2bTxt.slice(0, 300));
+      logStep("gstr2b-render", "len=" + renderedLen);
       onGstr2b = true;
     }
     if (!onGstr2b) {
