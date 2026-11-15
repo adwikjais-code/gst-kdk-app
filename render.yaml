@@ -1,0 +1,18 @@
+# Deploy the engine on Render:  https://render.com → New → Blueprints
+services:
+  - type: web
+    name: kdk-gst-engine
+    runtime: node
+    rootDir: engine
+    plan: free
+    buildCommand: npm install --omit=optional   # demo mode: light & fast
+    startCommand: npm start
+    healthCheckPath: /api/kdk/status
+    envVars:
+      - key: MODE
+        value: demo
+      # For LIVE portal automation instead:
+      # buildCommand: npm install && npx playwright install chromium --with-deps
+      #   - key: MODE
+      #     value: live
+      # NOTE: live mode works best from an India-based box (VPS), not free datacenter IPs.
