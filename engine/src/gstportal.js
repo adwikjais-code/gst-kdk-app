@@ -317,7 +317,7 @@ function isRejected(page) {
   let u = ""; try { u = page.url(); } catch { /* ignore */ }
   return REJECTED_RE.test(u) || false;
 }
-async function settle(page, tag, logStep, waitMs = 8000) {
+async function settle(page, tag, logStep, waitMs = 6000) {
   await page.waitForTimeout(waitMs);
   await dismissPopup(page);
   await snap(page, tag).catch(() => {});
@@ -542,7 +542,7 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
             logStep("returns-search", "fy=" + fyLabel + " q=" + quarter + " m=" + months[mm - 1]);
           }
         }
-        await page.waitForTimeout(8000);
+        await page.waitForTimeout(6000);
         await snap(page, "returns-after-search").catch(() => {});
         await dumpTables(page, "returns-after-search");
       }
@@ -589,8 +589,8 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
   // ===== STEP 4: Notices / Intimations =====
   try {
     if (await visit(page, U.notices, "Notices / Intimation", "notices", logStep)) {
-      await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
-      await page.waitForTimeout(4000);
+      await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
+      await page.waitForTimeout(3000);
       const rows = await grabRows(3);
       const ntxt = await bodyText();
       logStep("notices-rows", "rawRows=" + rows.length + " | txt=" + ntxt.slice(0, 300));
@@ -625,7 +625,7 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
             await s2.nth(2).selectOption({ label: mons[mm2 - 1] }).catch(() => {});
             const sb = page.locator("button:has-text('SEARCH')").first();
             if (await sb.isVisible({ timeout: 3000 })) await sb.click({ timeout: 5000 }).catch(() => {});
-            await page.waitForTimeout(8000);
+            await page.waitForTimeout(6000);
           }
         }
       }
@@ -645,14 +645,14 @@ async function scrapeAll(s, page, fp, autoUploadGstr1) {
     });
     logStep("gstr2b-view-click", clicked2b);
     if (clicked2b === "clicked") {
-      await page.waitForTimeout(10000);
+      await page.waitForTimeout(8000);
       await snap(page, "gstr2b-statement").catch(() => {});
       await dumpTables(page, "gstr2b-statement");
-      await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
+      await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
       onGstr2b = true;
     }
     if (!onGstr2b) {
-      await page.waitForTimeout(8000); // spacing between subdomain hops (WAF rate)
+      await page.waitForTimeout(5000); // spacing between subdomain hops (WAF rate)
       if (await visit(page, s.gstr2bUrl || U.gstr2bGuess, "GSTR-2B", "gstr2b-page", logStep)) {
         onGstr2b = true;
       }
